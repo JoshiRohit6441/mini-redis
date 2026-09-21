@@ -1,8 +1,22 @@
 # mini-redis
 
-A small in-memory key-value server inspired by Redis. It listens over TCP and supports `PING`, `SET`, `GET`, and `DEL`, plus optional TTL with lazy expiry.
+A **learning prototype** of Redis: a TCP in-memory key-value server that shows how the core pieces fit together.
 
-This is a learning prototype, not Redis-compatible. It uses a custom `::` text protocol, not RESP, so `redis-cli` will not work.
+It is not a Redis clone and not Redis-compatible. The protocol is a simple `::` text format, not RESP, so `redis-cli` and official clients will not work.
+
+## What this prototype covers
+
+| Redis idea | In this project |
+|---|---|
+| TCP server | Node `net` server on port `3000` |
+| Line-based protocol | `COMMAND::key::value::ttl` + incoming buffer |
+| In-memory store | Process-local `Map` |
+| Core commands | `PING`, `SET`, `GET`, `DEL` |
+| TTL | Optional time on `SET` (`5s`, `2m`, `1h`, `1d`) |
+| Lazy expiry | Key is deleted only when `GET` finds it expired |
+| Max memory + LRU | Evict least-recently-used keys when `max_memory` is full |
+
+Restarting the process clears all data. Nothing is written to disk.
 
 ## Run
 
@@ -11,11 +25,13 @@ npm install
 npm run dev
 ```
 
-Server listens on `localhost:3000`. Connect with netcat:
+Connect with netcat:
 
 ```bash
 nc localhost 3000
 ```
+
+Default config (`src/config.js`): port `3000`, `max_memory` `1024` bytes (small on purpose, so LRU is easy to test).
 
 ## Protocol
 
@@ -45,40 +61,45 @@ get::name
 Key expired
 ```
 
+If a new `SET` cannot fit even after evicting LRU keys, the server returns `Memory limit exceeded`.
+
 ## How it works
 
 ```text
 TCP client
     → tcpServer (port 3000)
-    → connector (socket)
+    → connector (buffer until `\n`)
     → parser (COMMAND::key::value::ttl)
-    → storage (in-memory Map)
+    → storage (Map + TTL + LRU)
     → response
 ```
 
-- **Storage** — keys live in a process-local `Map`. Restarting the server clears everything.
-- **TTL** — `SET` with a time suffix stores `expirationTime = now + ttl`.
-- **Lazy expiry** — nothing is deleted on a timer. On `GET`, if the key is past `expirationTime`, it is removed and the client gets `Key expired`.
+- **Storage** — each key is `{ value, expirationTime }`.
+- **Lazy TTL** — no background timer. On `GET`, an expired key is removed and the client gets `Key expired`.
+- **LRU** — `Map` insertion order tracks recency. `GET` / overwrite moves a key to the end. When memory is full, the oldest key is evicted first.
 
-`DEL` does not check expiry. Expired keys that are never read stay in memory until the process exits.
+`DEL` does not check expiry. Expired keys that are never read stay in memory until a `GET`, an LRU eviction, or process exit.
 
 ## Project layout
 
 ```text
 index.js
 src/
-  server/tcpServer.js      TCP listen + connections
-  server/connector.js      per-socket request/response
-  protocol/parser.js       split and validate commands
-  storage/storage.js       SET / GET / DEL / PING
-  ttl/expirationTime.js    TTL calculate + validate
+  config.js                port and max_memory
   enums.js                 commands and time units
+  server/tcpServer.js      TCP listen + connections
+  server/connector.js      per-socket buffer and request/response
+  protocol/parser.js       split and validate commands
+  storage/storage.js       SET / GET / DEL / PING + LRU evict
+  ttl/expirationTime.js    TTL calculate + validate
+  LRU/memoryCalculation.js entry size and memory counter
 ```
 
-## Not implemented yet
+## Out of scope
+
+This prototype does not include:
 
 - RESP / `redis-cli` compatibility
 - Active (background) expiry
 - Persistence (RDB / AOF)
-- Lists, hashes, sets
-- Memory limits / eviction
+- Lists, hashes, sets, pub/sub, transactions
